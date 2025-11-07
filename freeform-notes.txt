@@ -1,0 +1,104 @@
+What is ZipTag?
+
+It is a data store that can store anything texty. It is built on the principle that we make things way too complex and heavyweight for what is actually not a lot of data.
+
+It is awesome because
+  - It is schema-less, but works like a sparse, dynamic schema
+  - It is the simplest graph database you've ever seen
+  - Lightweight code and complexity
+  - Make your own indices as tags
+  - Find anything from any angle very efficiently
+  - Two-way edges can be traversed
+  - Query variables can be composed
+  - Always improving efficiency
+
+But with some caveats
+  - Query is memory optimized, not disc optimized
+    - Assumes you have gigabytes of free memory if you have gigabytes of data
+  - Can be momentarily inconsistent, as updates are write-through memory
+  - Tag types are limited to 64 lower case chars and tag size is limited to 65,536 chars
+  - Queries are dirty, allowing updates while query executing (to save memory/compute)
+  - No special security at this point
+    - In-memory not encrypted
+	- No controls on access
+	- Not encrypted at rest by default (can enable)
+  - Not distributed
+  - if your match functions are inefficient, so will be the search
+  - searching giant text can be slow
+    - file references are not searchable unless you create attributes on them
+
+How does it work?
+- Everything is stored in memory structures to avoid disk complexity
+- Things are stored to disk, but asynchronously as a write through event pump
+- There are tags (tag) and tag types (ttype)
+- Every tag has 1 type
+- Tags are immutable, but can be deleted
+- Tags have link to tags
+- Abandoned tag types are deleted from the store
+- Queries are optimized to remove redundancies, even partial, as part of plan
+- Traversals done from smaller set to bigger set for efficiency
+- Use many threads concurrently to break down joins
+
+
+Data model
+
+ttype
+ - identifier (lower-case, hyphens-allowed)\
+ 
+tag
+ - tagid (long)
+ - val (65536 length string)
+ - ttype (foreign key but useful to have close)
+ - links dict[ttype, tag[]]
+
+Basic API
+	add_tag(ttype, tval):tag //will fetch if it already exists with the value
+	rem_tag(ttype, tag)
+	rem_tag(ttype, tagid)
+	rem_tags(query)
+	fetch(query):tag[]
+	link(ttype, tag)
+	link(ttype, tag[])
+	link(ttype, tagid)
+	link(ttype, tagid[])
+	link(query)
+	unlink(ttype, tag)
+	unlink(ttype, tag[])
+	unlink(ttype, tagid)
+	unlink(ttype, tagid[])
+	unlink(query)
+
+Queries
+
+(Still designing query syntax)
+
+- Start from a pipe in "|" which is implicitly root "." if not explicitly called out, but will not be root if used as a query variable
+- Must take a single input type and a single output type
+- Work by type+filter on each traversal: | ttype > tag filter > ttype > tag filter > ttype
+- Support named query variables to use in place of sections of the traversal
+- Insert custom matching functions
+- Nest disjunctive normal form syntax to expand and contract sets
+
+Built-in query functions:
+	==
+	!=
+	startswith
+	regex(expr)
+	>=
+	>
+	<=
+	<
+	>=# // '#' compares by number
+	>#
+	<=#
+	<#
+	all
+	any
+	top(f(n))
+	match(f(n))
+	match_first(f(n))
+	exclude(f(n))
+
+
+
+
