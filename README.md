@@ -3,6 +3,8 @@
 *A tiny, schema-less, graph-flavored data store for anything texty.*
 Status: **experimental / pre-1.0**
 
+---
+
 ## Why ZipTag?
 
 Most app data is small, text-ish, and doesn’t need heavy infra. **ZipTag** gives you:
@@ -13,28 +15,32 @@ Most app data is small, text-ish, and doesn’t need heavy infra. **ZipTag** giv
 * **Fast in-memory queries** with plan simplification and smart traversal.
 * **What-if overlays**: run queries against *hypothetical* changes without committing.
 * **Transactional packages**: apply a set of adds/deletes/links as one atomic revision.
-* **Composable query variables** and pluggable match functions.
+* **Composable query functions** and pluggable match functions.
 * Focus on **lightweight code** and **ever-improving efficiency**.
 
 North star: keep the model simple, keep the ops small, keep the queries snappy.
+
+---
 
 ## Caveats
 
 * **Memory-first**: queries are optimized for RAM, not disk. Keep spare RAM proportional to live data.
 * **Eventual durability** by default: memory updates are journaled and fsynced in batches.
-* **Tag limits**:
+* **Tag limits**
 
-  * Tag types: lower-case (hyphens allowed), max 64 characters
-  * **Tag values: max 1,024 characters** (store larger payloads behind a `file-ref`)
+  * Tag types: lower-case (hyphens allowed), max 64 characters.
+  * **Tag values: max 1,024 characters** (store larger payloads behind a `file-ref`).
 * **Identity is immutable**: `(ttype, val)` is identity; **no renames**.
 * **Security**: none built-in yet.
 
-  * In memory: not encrypted
-  * No access controls
-  * Not encrypted at rest by default (opt-in planned)
+  * In memory: not encrypted.
+  * No access controls.
+  * Not encrypted at rest by default (opt-in planned).
 * **Single node** only.
 * **Performance is on you**: custom match functions define your search cost.
 * **Big blobs**: not searchable unless you pre-tag attributes.
+
+---
 
 ## How it works
 
@@ -48,8 +54,9 @@ North star: keep the model simple, keep the ops small, keep the queries snappy.
 * **Handle**: `tref` is a compact int64 for fast references (not identity).
 * **Links** are untyped and bidirectional; express relationship semantics via *tags* (relation-as-tag).
 * **Revisions**: every committed transaction produces a new monotonic **rev**.
+  You can run queries at a specific `rev` or against **overlay layers** (hypothetical packages) before commit.
 
-  * You can run queries at a chosen `rev` or against **overlay layers** (hypothetical packages) before commit.
+---
 
 ## Data model
 
@@ -79,6 +86,8 @@ tag.ttype  # str
 tag.links  # list[Tag] (may be lazy / view-like)
 ```
 
+---
+
 ## Install
 
 ZipTag isn’t on PyPI yet. Use it as a local dependency.
@@ -90,6 +99,8 @@ pip install -e .
 ```
 
 Python 3.9+ recommended.
+
+---
 
 ## Quick start
 
@@ -107,17 +118,17 @@ speaks  = store.add_tag("rel",      "speaks")  # relation-as-tag convention
 store.link(ada.tref,   speaks.tref)
 store.link(speaks.tref, python.tref)
 
-# Languages Ada speaks
+# Languages Ada is connected to via "speaks"
 q = '| person == "ada lovelace" > rel == "speaks" > language'
-langs = store.fetch(q)                              # -> list[Tag]
-print([t.val for t in langs])                       # ['python']
+langs = store.fetch(q)                      # -> list[Tag]
+print([t.val for t in langs])               # ['python']
 ```
 
 > `add_tag(ttype, val)` is **get-or-create** by `(ttype, val)`.
 
 ---
 
-# Transactions, overlays & revisions
+## Transactions, overlays & revisions
 
 **Goal:** represent a *package of change* (adds/deletes/links/unlinks, and optional ttype declarations) that can be:
 
@@ -125,14 +136,14 @@ print([t.val for t in langs])                       # ['python']
 * **committed atomically** to produce a new **revision**,
 * **resumed** safely after a crash (idempotent, WAL-backed).
 
-## Mental model
+### Mental model
 
 * A **Tx** is a small **delta layer**: `(Δtags, Δlinks, Δtombstones)`.
 * A **Hypothetical** query layers one or more Tx deltas **above** a base revision.
 * A **Commit** merges the Tx into the base and advances `rev`.
 * Operations inside Tx are **idempotent** (e.g., `add_tag` by `(ttype,val)`, `link` deduped).
 
-## API sketch
+### API sketch
 
 ```python
 # Read the current committed revision
@@ -168,12 +179,12 @@ tx.link(a, b) -> int             # 1 if added, 0 if existed
 tx.unlink(a, b) -> int
 tx.declare_ttype(name: str)      # optional, for metadata/back-compat
 tx.drop_ttype(name: str)         # only if empty; otherwise error
-tx.abort()                        # discard delta
-tx.commit() -> rev                # atomic merge into base
+tx.abort()                       # discard delta
+tx.commit() -> rev               # atomic merge into base
 ```
 
-* **`overlays=[...]`** accepts Tx objects *or* persisted Tx IDs (if you store staged packages).
-* New ephemeral tags inside overlays use temporary negative `tref` under the hood; callers see normal `Tag`.
+* **`overlays=[…]`** accepts Tx objects *or* persisted Tx IDs (if you implement staged packages).
+* New ephemeral tags inside overlays use temporary negative `tref` under the hood; callers should treat `(ttype,val)` as identity and not persist overlay `tref`s.
 
 ### Isolation & layering
 
@@ -181,83 +192,224 @@ tx.commit() -> rev                # atomic merge into base
 * **SNAPSHOT(rev)**: consistent read at a past revision.
 * **OVERLAY**: `rev` + ordered overlays (last wins). Deletes (tombstones) in an overlay mask base entities.
 
-### Backward compatibility
+---
 
-Legacy single-op methods (`add_tag`, `link`, …) remain and internally use short auto-commit Tx.
+## Queries (revamped)
+
+A query is a **pipeline of traversals** that always starts with `|` and ends at a **ttype** step.
+
+### Core rules
+
+* Tokens are **space-separated**.
+* `>` means **traverse** to neighbors.
+* **Immediately after `>` you must put a ttype** (lower-case, hyphens OK, no spaces).
+* After a ttype you may add a **matching condition**. If absent, it matches **any** tag of that ttype.
+* The special name **`tag`** inside a condition refers to the **current tag’s string value**.
+* Results are **sets** (deduped). Order is unspecified (tie-break: `tref` ascending).
+* Pipelines can be combined with **`AND` / `OR` / `NOT`** as **set operators**; every combined pipeline must end at the **same output ttype**.
+
+> All queries start with `|`. All queries **end** at a **ttype step** (i.e., the last tokenized step is a ttype with an optional condition).
+
+### Matching conditions (after a ttype)
+
+* **Equality/inequality**: `== "Python"`, `!= "C"`.
+* **Function call**: `startswith("py")`, `regex("^[A-Z]$")`, `lower(tag) == "python"`, `len(tag) >= 3`, `num(tag) > 10`.
+* **Grouped logic** with `where ( … )`:
+
+  * `| language where (len(tag) > 1 and not startswith("py"))`
+
+**Disambiguation:** The traversal `>` appears **between steps**. Inside `where ( … )`, `>` is a **comparison** operator.
+
+### Set operators
+
+Set operators combine **pipelines** that end at the **same ttype**:
+
+* `A AND B` → intersection
+* `A OR B`  → union (deduped)
+* `A NOT B` → set difference
+
+**Precedence:** `NOT` > `AND` > `OR`. Use parentheses for clarity.
+
+Errors:
+
+* Mixing output ttypes (e.g., `… > person AND … > language`) is invalid: *“Set operator requires same output ttype; got person vs language.”*
+
+### Built-in functions (conditions)
+
+String:
+
+* `len(tag)` → int
+* `lower(tag)`, `upper(tag)` → str
+* `startswith(prefix: str)` → bool *(applies to `tag` as the subject)*
+* `regex(pattern: str)` → bool (ECMAScript/PCRE-lite; anchor with `^`/`$`)
+
+Numeric:
+
+* `num(tag)` → float|int (parse from `tag`)
+* Comparisons: `> >= < <= == !=` *(inside `where ( … )`)*
+
+Logic (inside `where`):
+
+* `and`, `or`, `not`, with standard precedence
+
+Extensibility:
+
+* Register **custom predicate functions** in the host (e.g., `overlaps(start_iso, end_iso)` for time ranges). They are then callable in conditions like any built-in.
+
+### Grammar (EBNF)
+
+```
+query        := set_expr ;
+
+set_expr     := pipeline { set_op pipeline } ;
+set_op       := 'AND' | 'OR' | 'NOT' ;
+
+pipeline     := '|' step { '>' step } ;           # must end at a ttype step
+step         := IDENT [ filter ] ;                # IDENT = ttype
+
+filter       := compare | funcall | where ;
+compare      := '==' STRING | '!=' STRING ;
+funcall      := NAME '(' args? ')' ;              # e.g., startswith("z")
+where        := 'where' '(' bool_expr ')' ;
+
+bool_expr    := or_expr ;
+or_expr      := and_expr { 'or' and_expr } ;
+and_expr     := not_expr { 'and' not_expr } ;
+not_expr     := [ 'not' ] rel_expr ;
+rel_expr     := add_expr [ rel_op add_expr ] ;
+rel_op       := '==' | '!=' | '>' | '>=' | '<' | '<=' ;
+
+add_expr     := term { ('+' | '-') term } ;
+term         := factor { ('*' | '/') factor } ;
+factor       := NUMBER | STRING
+              | NAME '(' args? ')'                # functions incl. len, lower, num, custom
+              | NAME                               # names like tag
+              | '(' bool_expr ')' ;
+
+args         := expr { ',' expr } ;
+expr         := bool_expr ;
+```
+
+**Lexical**
+
+* Tokens are separated by **spaces**.
+* Strings use double quotes; escape with `\"` and `\\`.
+* `>` appears only **between steps** in a `pipeline`. Inside `where (…)`, `>` is a **comparison**.
 
 ---
 
-## Queries
+## Query walkthrough (worked examples)
 
-The query language is designed for clarity over untyped links with strong set semantics.
-
-* A query starts with `|`.
-* `>` means “follow links” (untyped). Then **filter by ttype and value**.
-* Steps alternate between traversals and filters. Single input and output ttypes keep plans simple.
-* Named variables splice reusable subpaths.
-* Functions plug into filters.
-* **Overlays** are passed via API (`overlays=[...]`) or an optional DSL prefix.
-
-### Grammar quick-ref
+Dataset (short-hand: `tref:ttype:"value"`):
 
 ```
-query        := ['with' overlay_block] '|' step { '>' step } ;
-overlay_block:= '{' overlay_stmt { ';' overlay_stmt } '}' ;
-overlay_stmt := add_tag | rem_tag | link | unlink ;
-add_tag      := '+tag' '(' IDENT ',' STRING ')' ['as' NAME] ;
-rem_tag      := '-tag' '(' IDENT ',' STRING ')' ;
-link         := 'link' '(' ref ',' ref ')' ;
-unlink       := 'unlink' '(' ref ',' ref ')' ;
-ref          := NAME | '(' IDENT ',' STRING ')' ;
-
-step         := type_filter [ value_filter ] | any | varref ;
-type_filter  := IDENT
-any          := '*'
-value_filter := compare | funcall | group ;
-compare      := '==' STRING | '!=' STRING ;
-group        := '(' disjunction ')' ;
-disjunction  := conjunction { 'or' conjunction } ;
-conjunction  := predicate { 'and' predicate } ;
-predicate    := compare | funcall ;
-funcall      := NAME '(' args? ')' ;
-args         := expr { ',' expr } ;
-expr         := STRING | NUMBER | NAME | funcall ;
-varref       := NAME
+1:person:"Bob"       2:person:"Marco"    3:person:"Linda"
+4:language:"Python"  5:language:"C"      6:language:"English"  7:language:"Spanish"
+8:program:"Pytorch"  9:program:"Windows 95"
+10:hair-color:"brown" 11:hair-color:"black" 12:hair-color:"zebra"
+13:language-type:"programming" 14:language-type:"spoken"
 ```
 
-**Note:** The DSL overlay block is sugar for API overlays; it does **not** persist.
-
-### Determinism and ordering
-
-Results are **sets**. Order is unspecified unless you apply an ordering function (`top`, `sort(by=...)` if/when provided). Tie-breakers default to **`tref` ascending**.
-
-### Built-in functions
+Links (bidirectional):
 
 ```
-startswith(s)
-regex(expr)
-num(s)
->=, >, <=, <
-all, any
-top(n, by=func?)
-match(func)
-match_first(keyfunc)
-exclude(func)
-len(s)
-lower(s), upper(s)
+Bob:   1-4, 1-6, 1-10
+Marco: 2-6, 2-7, 2-11, 2-8, 2-5
+Linda: 3-6, 3-10, 3-4, 3-5, 3-9
+
+Language relations: 4-5            # Python ↔ C
+Program→lang:       8-4, 9-5       # Pytorch→Python, Win95→C
+Language→type:      4-13, 5-13, 6-14, 7-14
 ```
 
-Examples:
+**All people connected to any language**
 
 ```
-# People who speak Python
-| person > rel == "speaks" > language == "python"
+| language > person
+→ [Bob, Marco, Linda]
+```
 
-# Documents that mention any language starting with "p"
-| doc > rel == "mentions" > language > startswith("p")
+**People connected to Python**
 
-# Numeric comparisons via num(val)
-| build > version > match(lambda t: num(t.val) >= 3)
+```
+| language == "Python" > person
+→ [Bob, Linda]
+```
+
+**All hair colors**
+
+```
+| hair-color
+→ [brown, black, zebra]
+```
+
+**Hair colors starting with “z”**
+
+```
+| hair-color startswith("z")
+→ [zebra]
+```
+
+**Hair colors that at least one person has**
+
+```
+| person > hair-color
+→ [brown, black]
+```
+
+**Languages with a single character**
+
+```
+| language where (len(tag) == 1)
+→ [C]
+```
+
+**Languages with more than one character**
+
+```
+| language where (len(tag) > 1)
+→ [English, Spanish, Python]
+```
+
+**Programming languages used by people with black hair (intersection)**
+
+```
+| hair-color == "black" > person > language
+AND
+| language-type == "programming" > language
+→ [C]
+```
+
+**Spoken languages for people with black hair**
+
+```
+| hair-color == "black" > person > language
+AND
+| language-type == "spoken" > language
+→ [English, Spanish]
+```
+
+**Hair colors that exist but no one has (difference)**
+
+```
+| hair-color
+NOT
+| person > hair-color
+→ [zebra]
+```
+
+**Programs used by people who know Python**
+
+```
+| language == "Python" > person > program
+→ [Pytorch, Windows 95]
+```
+
+**People who use programs written in C**
+
+```
+| program > language == "C" > program > person
+→ [Marco, Linda]
 ```
 
 ---
@@ -299,12 +451,17 @@ Because `add_tag` and `link` are idempotent, replays are safe even if some ops w
 | **tx.commit** | **yes** | new `rev`    | after WAL flush |
 | bulk variants | no      | stepwise     | after WAL flush |
 
+Crash consistency notes:
+
+* Single-op “auto-commit” paths internally wrap a Tx; visibility is immediate, durability follows the next flush. Use `store.sync()` to force durability at batch boundaries.
+* Overlay `tref`s are temporary; on commit, permanent positive `tref`s are assigned. Treat `(ttype,val)` as identity across commit boundaries.
+
 ---
 
 ## Identity, uniqueness, and deletes
 
 * **Identity**: `(ttype, val)` is immutable and unique (per `ttype`). `add_tag` is idempotent.
-* **`tref`**: monotonic int64 handle assigned at creation.
+* **`tref`**: monotonic int64 handle assigned at creation; never reused.
 * **Deletes**:
 
   * `rem_tag` removes the tag and all incident links (records a tombstone with `delete_rev`).
@@ -324,13 +481,16 @@ Because `add_tag` and `link` are idempotent, replays are safe even if some ops w
 
   * per-ttype map `(val -> tref)` for get-or-create
   * adjacency sets for links
-* `startswith` and `regex` are scan-based today; add match functions as needed.
+* **Guardrails**:
+
+  1. Filter by **ttype** *first*, then add conditions (`where`) to keep traversals narrow.
+  2. Pre-bucket high-fanout sets with intermediate tags or “index nodes” (e.g., `idx-token:"foo"`).
 
 ---
 
 ## Examples: COD Fish (contract engine)
 
-**COD Fish** is a marketplace for compute. Buyers and providers trade time-bounded compute slots. This exercises constraints and **what-if overlays**.
+**COD Fish** is a marketplace for compute. Buyers and providers trade time-bounded compute slots and constraints.
 
 ### Core ttypes
 
@@ -341,40 +501,28 @@ Because `add_tag` and `link` are idempotent, replays are safe even if some ops w
 * Calendars: `holiday`
 * Relations (`rel` values): `has-slot`, `has-cap`, `requires-cap`, `requires-slo`, `blocks-country`, `blackout`, `resells`, `excludes-provider`, `contract`
 
-> For large docs, store a `file-ref` and link to it.
+> For large docs, store a `file-ref` and link to it (e.g., `file-ref:"sha256:…"` with `bytes`, `mime`).
 
-### Seed (Python)
+### Domain function example
 
-```python
-S = ZipTagStore("./zdata")
-azure = S.add_tag("provider","azure")
-john  = S.add_tag("provider","johns-garage-rig")
-has_slot = S.add_tag("rel","has-slot"); has_cap = S.add_tag("rel","has-cap")
-slot2 = S.add_tag("slot","2025-11-10T18:00Z/PT4H")
-S.link(azure, has_slot); S.link(has_slot, slot2)
-for c in ["rtx-5090","32","128","us-west","ssd","99.9","200"]:
-    # map to ttypes: gpu, cpu-cores, ram-gb, region, storage, sla-uptime, sla-latency-p95-ms
-    pass
-```
+Register `overlaps(start_iso, end_iso)` to test ISO-8601 interval overlap against `slot` values.
 
 ### Query: buyer needs `us-west`, ≥32 cores, ≥128 GB, SSD, latency ≤200 ms
 
 ```
-| slot > overlaps("2025-11-10T14:00Z","2025-11-10T20:00Z")
+| slot overlaps("2025-11-10T14:00Z","2025-11-10T20:00Z")
 > rel == "has-cap" > region == "us-west"
-> rel == "has-cap" > cpu-cores > num(val) >= 32
-> rel == "has-cap" > ram-gb    > num(val) >= 128
+> rel == "has-cap" > cpu-cores where (num(tag) >= 32)
+> rel == "has-cap" > ram-gb    where (num(tag) >= 128)
 > rel == "has-cap" > storage   == "ssd"
-> rel == "has-cap" > sla-latency-p95-ms > num(val) <= 200
+> rel == "has-cap" > sla-latency-p95-ms where (num(tag) <= 200)
 > rel == "has-slot" > provider
 ```
 
-### What-if overlay: buyer excludes a provider; provider adds a new slot
-
-**API overlay**
+### What-if overlay: buyer excludes a provider; provider proposes a new slot
 
 ```python
-tx = S.begin_tx()
+tx = store.begin_tx()
 excl = tx.add_tag("rel","excludes-provider")
 tx.link(tx.add_tag("buyer","acme-ai"), excl)
 tx.link(excl, tx.add_tag("provider","azure"))
@@ -383,32 +531,18 @@ s2 = tx.add_tag("slot","2025-11-10T22:00Z/PT2H")
 tx.link(tx.add_tag("provider","johns-garage-rig"), tx.add_tag("rel","has-slot"))
 tx.link(tx.add_tag("rel","has-slot"), s2)
 
-cands = S.fetch(q, overlays=[tx])   # overlay affects only this call
+cands = store.fetch('| slot > rel == "has-slot" > provider', overlays=[tx])
 ```
 
-**DSL overlay**
-
-```
-with {
-  +tag(rel, "excludes-provider") as EX;
-  link( (buyer,"acme-ai"), EX );
-  link( EX, (provider,"azure") );
-  +tag(slot,"2025-11-10T22:00Z/PT2H") as S2;
-  link( (provider,"johns-garage-rig"), (rel,"has-slot") );
-  link( (rel,"has-slot"), S2 );
-}
-| slot > rel == "has-slot" > provider
-```
-
-### Buying (contract as tag)
+### Buying (contract as a tag)
 
 ```python
-tx = S.begin_tx()
+tx = store.begin_tx()
 c   = tx.add_tag("contract", "acme-2025-11-10-azure-slot2")
 r   = tx.add_tag("rel","contract")
 tx.link(c,r); tx.link(r, tx.add_tag("buyer","acme-ai"))
-tx.link(c,r); tx.link(r, S.add_tag("provider","azure"))
-tx.link(c,r); tx.link(r, S.add_tag("slot","2025-11-10T18:00Z/PT4H"))
+tx.link(c,r); tx.link(r, store.add_tag("provider","azure"))
+tx.link(c,r); tx.link(r, store.add_tag("slot","2025-11-10T18:00Z/PT4H"))
 rev = tx.commit()
 ```
 
@@ -416,14 +550,16 @@ Find future contracts for a buyer:
 
 ```
 | contract > rel == "contract" > buyer == "acme-ai" > rel == "contract" > slot
-> overlaps("2025-11-01T00:00Z","2025-12-01T00:00Z")
+AND
+| slot overlaps("2025-11-01T00:00Z","2025-12-01T00:00Z")
+> slot
 ```
 
 ---
 
-## Planned telemetry
+## Observability
 
-Telemetry is **off by default**. When enabled:
+When enabled (off by default):
 
 * **Counters**: ops by type (`add_tag`, `link`, `fetch`), plan cache hits/misses, adjacency inserts/removes, WAL appends/fsyncs, snapshot builds, tx begin/commit/abort.
 * **Gauges**: tag count, link count, per-ttype counts, WAL queue depth, bytes since last snapshot, current `rev`.
@@ -432,13 +568,53 @@ Telemetry is **off by default**. When enabled:
 
 ---
 
+## `fetch(..., explain=True)`
+
+When `explain=True`, `fetch` returns `(results, plan)` where `plan` is a plain dict describing the normalized plan:
+
+```python
+results, plan = store.fetch(
+  '| hair-color == "black" > person > language AND | language-type == "programming" > language',
+  explain=True
+)
+
+# plan (illustrative):
+{
+  "output_ttype": "language",
+  "set_ops": [{"op": "AND"}],
+  "pipelines": [
+    {
+      "steps": [
+        {"ttype": "hair-color", "filter": {"kind":"eq","value":"black"}},
+        {"ttype": "person"},
+        {"ttype": "language"}
+      ],
+      "estimated": {"cardinality": 3}
+    },
+    {
+      "steps": [
+        {"ttype": "language-type", "filter": {"kind":"eq","value":"programming"}},
+        {"ttype": "language"}
+      ],
+      "estimated": {"cardinality": 2}
+    }
+  ]
+}
+```
+
+Estimates may include per-step fan-outs when available; actuals can be added in debug builds.
+
+---
+
 ## Roadmap
 
-* Freeze **query DSL** (overlay block included) and `explain(query)` with cardinalities.
+* Freeze **query DSL** (this spec) and `explain(query)` with cardinalities.
 * **Minimal WAL + snapshots** (done), compaction details and tooling.
 * Optional disk-optimized indices for selected ttypes.
 * Observability polish (metrics schema, plan traces).
 * (Backlog) Typed edges if we ever need link attributes.
+
+---
 
 ## Contributing
 
@@ -451,9 +627,13 @@ PRs and issues welcome once the repo opens up. Helpful contributions:
 
 Please keep the project’s simplicity goal in mind.
 
+---
+
 ## License
 
 TBD (likely a permissive license such as MIT). Will be finalized before any public release.
+
+---
 
 ## Appendix: API sketch (updated)
 
@@ -475,7 +655,7 @@ class ZipTagStore:
     def current_rev(self) -> int: ...
     def fetch(self, query: str, *, rev: "int|None" = None,
               overlays: "list[Tx|str]|None" = None,
-              limit: "int|None" = None, explain: bool = False) -> "list[Tag]": ...
+              limit: "int|None" = None, explain: bool = False) -> "list[Tag] | tuple[list[Tag], dict]": ...
     def sync(self) -> None: ...
 
 class Tx:
